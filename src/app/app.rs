@@ -1,12 +1,12 @@
-use crate::{backend::pty::Pty, error::Result, terminal::renderer};
-
-use nix::libc::{TIOCGWINSZ, ioctl};
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use nix::pty::Winsize;
+use crate::{
+    backend::pty::Pty,
+    error::Result,
+    terminal::{renderer, screen::Screen},
+};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::SignalFd;
 use nix::unistd::read;
-use std::os::fd::AsRawFd;
 
 use std::io;
 use std::os::fd::AsFd;
@@ -14,13 +14,19 @@ use std::os::fd::AsFd;
 pub struct App {
     running: bool,
     pty: Pty,
+    screen: Screen,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
         let pty = Pty::spawn_shell()?;
+        let screen = Screen::new()?;
 
-        Ok(Self { running: true, pty })
+        Ok(Self {
+            running: true,
+            pty,
+            screen,
+        })
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -31,25 +37,6 @@ impl App {
         renderer::exit()?;
 
         result
-    }
-
-    fn terminal_size() -> Result<(u16, u16)> {
-        let stdout = io::stdout();
-
-        let mut size = Winsize {
-            ws_row: 0,
-            ws_col: 0,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-
-        let result = unsafe { ioctl(stdout.as_raw_fd(), TIOCGWINSZ, &mut size) };
-
-        if result == -1 {
-            return Err(io::Error::last_os_error().into());
-        }
-
-        Ok((size.ws_row, size.ws_col))
     }
 
     fn run_loop(&mut self) -> Result<()> {
@@ -74,11 +61,14 @@ impl App {
             // Block until at least one file descriptor is ready.
             poll(&mut fds, PollTimeout::NONE)?;
 
-            let stdin_events = fds[0].revents().unwrap_or(PollFlags::empty());
+            let stdin_events =
+                fds[0].revents().unwrap_or(PollFlags::empty());
 
-            let pty_events = fds[1].revents().unwrap_or(PollFlags::empty());
+            let pty_events =
+                fds[1].revents().unwrap_or(PollFlags::empty());
 
-            let signal_events = fds[2].revents().unwrap_or(PollFlags::empty());
+            let signal_events =
+                fds[2].revents().unwrap_or(PollFlags::empty());
 
             // Keyboard input
             if stdin_events.contains(PollFlags::POLLIN) {
@@ -102,17 +92,22 @@ impl App {
 
             // Terminal resized
             if signal_events.contains(PollFlags::POLLIN) {
-                //SIGWINCH only tells the terminal was resized.
                 if signal_fd.read_signal()?.is_some() {
-                    let (rows, cols) = Self::terminal_size()?;
+                    self.screen.resize()?;
 
-                    self.pty.resize(rows, cols)?;
+                    self.pty.resize(
+                        self.screen.rows(),
+                        self.screen.cols(),
+                    )?;
                 }
             }
 
             // PTY closed/error
-            if pty_events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
-            {
+            if pty_events.intersects(
+                PollFlags::POLLHUP
+                    | PollFlags::POLLERR
+                    | PollFlags::POLLNVAL,
+            ) {
                 self.running = false;
             }
         }
