@@ -1,9 +1,9 @@
 use crate::{
     backend::pty::Pty,
     error::Result,
-    terminal::{renderer, screen::Screen},
+    terminal::{ansi::AnsiParser, renderer, screen::Screen},
 };
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{SigSet, Signal};
 use nix::sys::signalfd::SignalFd;
 use nix::unistd::read;
@@ -15,6 +15,7 @@ pub struct App {
     running: bool,
     pty: Pty,
     screen: Screen,
+    parser: AnsiParser,
 }
 
 impl App {
@@ -26,6 +27,7 @@ impl App {
             running: true,
             pty,
             screen,
+            parser: AnsiParser::new(),
         })
     }
 
@@ -61,14 +63,11 @@ impl App {
             // Block until at least one file descriptor is ready.
             poll(&mut fds, PollTimeout::NONE)?;
 
-            let stdin_events =
-                fds[0].revents().unwrap_or(PollFlags::empty());
+            let stdin_events = fds[0].revents().unwrap_or(PollFlags::empty());
 
-            let pty_events =
-                fds[1].revents().unwrap_or(PollFlags::empty());
+            let pty_events = fds[1].revents().unwrap_or(PollFlags::empty());
 
-            let signal_events =
-                fds[2].revents().unwrap_or(PollFlags::empty());
+            let signal_events = fds[2].revents().unwrap_or(PollFlags::empty());
 
             // Keyboard input
             if stdin_events.contains(PollFlags::POLLIN) {
@@ -82,36 +81,47 @@ impl App {
             }
 
             // PTY output
+
             if pty_events.contains(PollFlags::POLLIN) {
                 if let Some(size) = self.pty.read(&mut buffer)? {
                     if size > 0 {
-                        renderer::write(&buffer[..size])?;
+                        self.parser.feed(&mut self.screen, &buffer[..size]);
+                        renderer::render(&self.screen)?;
                     }
                 }
             }
-
             // Terminal resized
+
             if signal_events.contains(PollFlags::POLLIN) {
                 if signal_fd.read_signal()?.is_some() {
-                    self.screen.resize()?;
+                    let (rows, cols) = Screen::terminal_size()?;
 
-                    self.pty.resize(
-                        self.screen.rows(),
-                        self.screen.cols(),
-                    )?;
+                    self.screen.resize_to(rows, cols);
+                    self.pty.resize(rows, cols)?;
+
+                    renderer::render(&self.screen)?;
                 }
             }
 
             // PTY closed/error
-            if pty_events.intersects(
-                PollFlags::POLLHUP
-                    | PollFlags::POLLERR
-                    | PollFlags::POLLNVAL,
-            ) {
+            if pty_events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
+            {
                 self.running = false;
             }
         }
 
         Ok(())
     }
+}
+
+#[test]
+fn handles_cursor_up() {
+    let mut screen = Screen::with_size(5, 10);
+    let mut parser = AnsiParser::new();
+
+    parser.feed(&mut screen, b"\x1b[3;4H");
+    parser.feed(&mut screen, b"\x1b[A");
+
+    assert_eq!(screen.cursor_row(), 1);
+    assert_eq!(screen.cursor_col(), 3);
 }
