@@ -14,10 +14,10 @@ pub struct Pty {
 }
 
 impl Pty {
-    pub fn spawn_shell() -> Result<Self> {
+    pub fn spawn_shell(rows: u16, cols: u16) -> Result<Self> {
         let winsize = Winsize {
-            ws_row: 24,
-            ws_col: 80,
+            ws_row: rows.max(1),
+            ws_col: cols.max(1),
             ws_xpixel: 0,
             ws_ypixel: 0,
         };

@@ -1,6 +1,8 @@
 mod app;
 mod backend;
+mod constants;
 mod error;
+mod pane;
 mod terminal;
 
 use app::App;
