@@ -31,7 +31,6 @@ impl Pane {
     }
 
     pub fn write_input(&mut self, input: &[u8]) -> Result<usize> {
-        self.screen.reset_scroll();
         self.pty.write(input)
     }
 

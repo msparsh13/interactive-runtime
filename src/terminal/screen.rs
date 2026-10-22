@@ -357,3 +357,5 @@ impl Screen {
             .saturating_sub(self.scroll_offset)
     }
 }
+
+// ctrl+T new terminal , ctrl+N change termainal
