@@ -1,8 +1,13 @@
-use crate::{error::Result, terminal::screen::Screen};
+use crate::{
+    error::Result,
+    terminal::screen::{Screen, Style},
+};
 
 use crossterm::{
     cursor, execute, queue,
-    style::Print,
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal::{self, Clear, ClearType},
 };
 
@@ -27,13 +32,19 @@ pub fn enter() -> Result<()> {
         cursor::MoveTo(0, 0),
     )?;
 
+    // mouse: press/release + drag, SGR encoding
+    stdout().write_all(b"\x1b[?1002h\x1b[?1006h")?;
     stdout().flush()?;
     Ok(())
 }
 
 pub fn exit() -> Result<()> {
+    stdout().write_all(b"\x1b[?1006l\x1b[?1002l")?;
+
     execute!(
         stdout(),
+        SetAttribute(Attribute::Reset),
+        ResetColor,
         cursor::Show,
         Clear(ClearType::All),
         cursor::MoveTo(0, 0),
@@ -42,41 +53,32 @@ pub fn exit() -> Result<()> {
 
     terminal::disable_raw_mode()?;
     stdout().flush()?;
-
     Ok(())
 }
 
-// Draw one screen across the full terminal.
-pub fn render(screen: &Screen) -> Result<()> {
-    let (width, height) = terminal::size()?;
-
-    queue!(stdout(), cursor::Hide, Clear(ClearType::All),)?;
-
-    render_region(
-        screen,
-        Rect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        },
-        false,
-    )?;
-
-    // Draw separator AFTER the screen content.
-    render_vertical_separator(screen, width / 2, 0, height)?;
-
-    // Draw cursor last.
-    render_cursor(
-        screen,
-        Rect {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        },
-    )?;
-
+fn apply_style(out: &mut impl Write, s: &Style) -> Result<()> {
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
+    if let Some(c) = s.fg {
+        queue!(out, SetForegroundColor(c))?;
+    }
+    if let Some(c) = s.bg {
+        queue!(out, SetBackgroundColor(c))?;
+    }
+    if s.bold {
+        queue!(out, SetAttribute(Attribute::Bold))?;
+    }
+    if s.dim {
+        queue!(out, SetAttribute(Attribute::Dim))?;
+    }
+    if s.italic {
+        queue!(out, SetAttribute(Attribute::Italic))?;
+    }
+    if s.underline {
+        queue!(out, SetAttribute(Attribute::Underlined))?;
+    }
+    if s.reverse {
+        queue!(out, SetAttribute(Attribute::Reverse))?;
+    }
     Ok(())
 }
 
@@ -86,46 +88,47 @@ pub fn render_region(screen: &Screen, rect: Rect, clear: bool) -> Result<()> {
     let mut out = stdout();
     let (terminal_width, terminal_height) = terminal::size()?;
 
-    // Ignore rectangles outside the terminal.
     if rect.x >= terminal_width || rect.y >= terminal_height {
         return Ok(());
     }
 
-    // Clip the pane to both its own dimensions and terminal bounds.
     let width = rect.width.min(screen.cols()).min(terminal_width - rect.x);
-
     let height = rect.height.min(screen.rows()).min(terminal_height - rect.y);
 
     if width == 0 || height == 0 {
         return Ok(());
     }
 
-    // Clear only this pane's area, never the rest of the terminal.
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
+
     if clear {
         let spaces = " ".repeat(width as usize);
-
         for row in 0..height {
-            queue!(out, cursor::MoveTo(rect.x, rect.y + row), Print(&spaces),)?;
+            queue!(out, cursor::MoveTo(rect.x, rect.y + row), Print(&spaces))?;
         }
     }
 
     let viewport_start = screen.viewport_start();
+    let mut last = Style::default();
 
     for visible_row in 0..height as usize {
         let buffer_row = viewport_start + visible_row;
-
-        queue!(out, cursor::MoveTo(rect.x, rect.y + visible_row as u16),)?;
+        queue!(out, cursor::MoveTo(rect.x, rect.y + visible_row as u16))?;
 
         for col in 0..width as usize {
-            let character = screen
-                .cell(buffer_row, col)
-                .map(|cell| cell.character)
-                .unwrap_or(' ');
-
-            queue!(out, Print(character))?;
+            let (ch, st) = match screen.cell(buffer_row, col) {
+                Some(c) => (c.character, c.style),
+                None => (' ', Style::default()),
+            };
+            if st != last {
+                apply_style(&mut out, &st)?;
+                last = st;
+            }
+            queue!(out, Print(ch))?;
         }
     }
 
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
     out.flush()?;
     Ok(())
 }
@@ -166,7 +169,7 @@ pub fn render_cursor(screen: &Screen, rect: Rect) -> Result<()> {
 
     queue!(
         out,
-        cursor::MoveTo(rect.x + col as u16, rect.y + row as u16,),
+        cursor::MoveTo(rect.x + col as u16, rect.y + row as u16),
         cursor::Show,
     )?;
 
@@ -179,40 +182,116 @@ pub fn hide_cursor() -> Result<()> {
     Ok(())
 }
 
-pub fn render_vertical_separator(screen: &Screen, x: u16, y: u16, height: u16) -> Result<()> {
-    let mut out = stdout();
-    let (terminal_width, terminal_height) = terminal::size()?;
+pub fn clear_all() -> Result<()> {
+    execute!(
+        stdout(),
+        SetAttribute(Attribute::Reset),
+        ResetColor,
+        Clear(ClearType::All)
+    )?;
+    Ok(())
+}
 
-    if x >= terminal_width || y >= terminal_height {
+/// Scrollbar in column `x`. Thumb = visible part of the buffer.
+pub fn render_scrollbar(screen: &Screen, x: u16, y: u16, height: u16) -> Result<()> {
+    let mut out = stdout();
+    let (tw, th) = terminal::size()?;
+    if x >= tw || y >= th {
+        return Ok(());
+    }
+    let h = height.min(th - y) as usize;
+    if h == 0 {
         return Ok(());
     }
 
-    let height = height
-        .min(screen.rows().saturating_sub(y))
-        .min(terminal_height - y);
+    let total = screen.buffer_rows().max(1);
+    let visible = (screen.rows() as usize).min(total);
+    let max_start = total - visible;
+    let thumb_len = (visible * h / total).clamp(1, h);
+    let track = h - thumb_len;
+    let thumb_top = if max_start == 0 {
+        0
+    } else {
+        (screen.viewport_start() * track + max_start / 2) / max_start
+    };
 
-    for row in 0..height {
-        queue!(out, cursor::MoveTo(x - 2, y + row), Print("│"),)?;
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
+    for row in 0..h {
+        let thumb = row >= thumb_top && row < thumb_top + thumb_len;
+        queue!(
+            out,
+            cursor::MoveTo(x, y + row as u16),
+            Print(if thumb { '█' } else { '│' })
+        )?;
     }
-
     out.flush()?;
     Ok(())
 }
-// Draw a horizontal separator line.
-pub fn render_horizontal_separator(screen: &Screen, x: u16, y: u16, width: u16) -> Result<()> {
-    let mut out = stdout();
-    let (terminal_width, terminal_height) = terminal::size()?;
 
-    if x >= screen.cols() || x >= terminal_width || y >= screen.rows() || y >= terminal_height {
+/// Horizontal divider for stacked splits.
+pub fn render_hline(x: u16, y: u16, width: u16) -> Result<()> {
+    let mut out = stdout();
+    let (tw, th) = terminal::size()?;
+    if x >= tw || y >= th {
+        return Ok(());
+    }
+    let width = width.min(tw - x) as usize;
+    queue!(
+        out,
+        SetForegroundColor(Color::DarkGrey),
+        cursor::MoveTo(x, y),
+        Print("─".repeat(width)),
+        ResetColor
+    )?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Border + title for a floating window. `rect` is the outer rectangle.
+pub fn render_box(rect: Rect, title: &str, focused: bool) -> Result<()> {
+    let mut out = stdout();
+    let (tw, th) = terminal::size()?;
+    if rect.width < 3
+        || rect.height < 2
+        || rect.x.saturating_add(rect.width) > tw
+        || rect.y.saturating_add(rect.height) > th
+    {
         return Ok(());
     }
 
-    let width = width.min(screen.cols() - x).min(terminal_width - x);
+    let color = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGrey
+    };
+    let inner = rect.width as usize - 2;
+    let label: String = format!(" {} ", title).chars().take(inner).collect();
+    let top = format!("┌{}{}┐", label, "─".repeat(inner - label.chars().count()));
 
-    for col in 0..width {
-        queue!(out, cursor::MoveTo(x + col, y), Print("─"),)?;
+    queue!(
+        out,
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(color),
+        cursor::MoveTo(rect.x, rect.y),
+        Print(top)
+    )?;
+
+    for row in 1..rect.height - 1 {
+        queue!(
+            out,
+            cursor::MoveTo(rect.x, rect.y + row),
+            Print('│'),
+            cursor::MoveTo(rect.x + rect.width - 1, rect.y + row),
+            Print('│')
+        )?;
     }
 
+    queue!(
+        out,
+        cursor::MoveTo(rect.x, rect.y + rect.height - 1),
+        Print(format!("└{}◢", "─".repeat(inner))),
+        ResetColor
+    )?;
     out.flush()?;
     Ok(())
 }

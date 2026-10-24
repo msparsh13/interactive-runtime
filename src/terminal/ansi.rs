@@ -4,6 +4,7 @@ enum ParserState {
     Ground,
     Escape,
     Csi(Vec<u8>),
+    Osc { esc: bool },
 }
 
 pub struct AnsiParser {
@@ -25,41 +26,38 @@ impl AnsiParser {
                 ParserState::Ground => self.process_ground(screen, byte),
                 ParserState::Escape => self.process_escape(byte),
                 ParserState::Csi(mut params) => self.process_csi(screen, byte, &mut params),
+                ParserState::Osc { esc } => self.process_osc(byte, esc),
             };
         }
     }
 
     fn process_ground(&self, screen: &mut Screen, byte: u8) -> ParserState {
         match byte {
-            0x1B => ParserState::Escape,
-            b'\n' => {
-                screen.write_char('\n');
-                ParserState::Ground
-            }
-            b'\r' => {
-                screen.write_char('\r');
-                ParserState::Ground
-            }
-            b'\t' => {
-                screen.write_char('\t');
-                ParserState::Ground
-            }
-            0x08 | 0x7F => {
-                screen.move_cursor_relative(0, -1);
-                ParserState::Ground
-            }
-            0x20..=0x7E => {
-                screen.write_char(byte as char);
-                ParserState::Ground
-            }
-            _ => ParserState::Ground,
+            0x1B => return ParserState::Escape,
+            b'\n' => screen.write_char('\n'),
+            b'\r' => screen.write_char('\r'),
+            b'\t' => screen.write_char('\t'),
+            0x08 => screen.backspace(),
+            0x20..=0x7E => screen.write_char(byte as char),
+            _ => {} // includes 0x7F (DEL), BEL, non-ASCII
         }
+        ParserState::Ground
     }
 
     fn process_escape(&self, byte: u8) -> ParserState {
         match byte {
             b'[' => ParserState::Csi(Vec::new()),
+            b']' => ParserState::Osc { esc: false },
             _ => ParserState::Ground,
+        }
+    }
+
+    // Swallow OSC (window title etc.) until BEL or ESC \
+    fn process_osc(&self, byte: u8, prev_esc: bool) -> ParserState {
+        if byte == 0x07 || (prev_esc && byte == b'\\') {
+            ParserState::Ground
+        } else {
+            ParserState::Osc { esc: byte == 0x1B }
         }
     }
 
@@ -82,23 +80,19 @@ impl AnsiParser {
 
     fn execute_csi(&self, screen: &mut Screen, params: &[u8], command: u8) {
         let params_str = String::from_utf8_lossy(params);
-        let is_private = params_str.starts_with('?');
-        let clean_params = if is_private {
-            &params_str[1..]
-        } else {
-            &params_str
-        };
 
-        let values: Vec<usize> = clean_params
-            .split(';')
-            .map(|value| value.parse::<usize>().unwrap_or(0))
+        // ? < = >  prefixes are private/extended modes we don't support.
+        if params_str.starts_with(['?', '<', '=', '>']) {
+            return;
+        }
+
+        // Treat ':' like ';' (e.g. 38:2::r:g:b).
+        let values: Vec<usize> = params_str
+            .split([';', ':'])
+            .map(|v| v.parse::<usize>().unwrap_or(0))
             .collect();
 
         let first = values.first().copied().unwrap_or(0);
-
-        if is_private {
-            return; // Safely ignore unsupported private mode sequences
-        }
 
         match command {
             b'A' => screen.move_cursor_relative(-(first.max(1) as isize), 0),
@@ -110,22 +104,17 @@ impl AnsiParser {
                 let col = values.get(1).copied().unwrap_or(1).max(1);
                 screen.move_cursor(row - 1, col - 1);
             }
-            b'G' => {
-                let col = first.max(1);
-                screen.move_cursor(screen.cursor_row(), col - 1);
-            }
+            b'G' => screen.set_cursor_col(first.max(1) - 1),
             b'J' => screen.clear_screen(first),
             b'K' => screen.clear_line(first),
-            b'm' => {}
+            b'm' => screen.apply_sgr(&values),
             b'P' => {
-                let count = first.max(1);
-                for _ in 0..count {
+                for _ in 0..first.max(1) {
                     screen.delete_char();
                 }
             }
             b'@' => {
-                let count = first.max(1);
-                for _ in 0..count {
+                for _ in 0..first.max(1) {
                     screen.insert_char(' ');
                 }
             }

@@ -30,6 +30,10 @@ impl Pane {
         &self.screen
     }
 
+    pub fn screen_mut(&mut self) -> &mut Screen {
+        &mut self.screen
+    }
+
     pub fn write_input(&mut self, input: &[u8]) -> Result<usize> {
         self.pty.write(input)
     }
@@ -39,6 +43,9 @@ impl Pane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        if self.screen.rows() == rows.max(1) && self.screen.cols() == cols.max(1) {
+            return Ok(());
+        }
         self.screen.resize_to(rows, cols);
         self.pty.resize(rows, cols)?;
         Ok(())
