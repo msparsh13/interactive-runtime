@@ -1,4 +1,4 @@
-use crate::constants::{SHIFT_PAGE_DOWN, SHIFT_PAGE_UP};
+use crate::constants::{SHIFT_PAGE_DOWN, SHIFT_PAGE_UP, KEY_SPLIT_SIDE , KEY_SPLIT_STACK , KEY_FLOAT , KEY_NEXT};
 use crate::{
     error::Result,
     pane::pane::Pane,
@@ -15,10 +15,6 @@ use nix::unistd::read;
 use std::io;
 use std::os::fd::AsFd;
 
-const KEY_SPLIT_SIDE: u8 = 0x14; // Ctrl+T
-const KEY_SPLIT_STACK: u8 = 0x1D; // Ctrl+]
-const KEY_FLOAT: u8 = 0x0F; // Ctrl+O
-const KEY_NEXT: u8 = 0x0E; // Ctrl+N
 
 struct Entry {
     id: usize,
